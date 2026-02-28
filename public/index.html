@@ -10,6 +10,9 @@
   <div id="hud">
     <div id="info">Connecting...</div>
     <div id="score">Score: 0</div>
+    <div>
+      <button id="returnHomeBtn" style="display:none;margin-top:8px;padding:6px 10px;border-radius:6px;border:0;background:#ff6b6b;color:#fff;cursor:pointer">ホームに戻る</button>
+    </div>
   </div>
   <div id="home">
     <div class="home-box">
@@ -17,6 +20,28 @@
       <p>モードを選択してください</p>
       <p>
         <input id="playerName" placeholder="プレイヤー名（例: 太郎）" style="padding:8px;width:80%;border-radius:6px;border:0;margin-top:8px" />
+      </p>
+      <p>
+        <select id="weaponSelect" style="padding:8px;width:80%;border-radius:6px;border:0;margin-top:8px">
+          <option value="smg">サブマシンガン (SMG)</option>
+          <option value="sniper">スナイパーライフル (Sniper)</option>
+        </select>
+      </p>
+      <p>
+        <select id="costumeSelect" style="padding:8px;width:80%;border-radius:6px;border:0;margin-top:8px">
+          <option value="default">通常</option>
+          <option value="red">赤</option>
+          <option value="blue">青</option>
+        </select>
+      </p>
+      <p style="margin-top:8px">
+        <label style="font-size:13px;color:#ddd"><input type="checkbox" id="noBotsCheckbox" /> オンライン時にボットを表示しない</label>
+      </p>
+      <p style="margin-top:8px">
+        <label style="font-size:13px;color:#ddd"><input type="checkbox" id="teamMatchCheckbox" /> チーム戦（2チーム）</label>
+      </p>
+      <p style="margin-top:8px">
+        <label style="font-size:13px;color:#ddd"><input type="checkbox" id="roundsCheckbox" /> ラウンド制（全3ラウンド、各ラウンド3分）</label>
       </p>
       <div class="buttons">
         <button id="btnCpu">CPU戦（ボットと対戦）</button>
@@ -26,6 +51,10 @@
     </div>
   </div>
   <canvas id="game"></canvas>
+  <div id="chat" class="chat">
+    <div id="chatLog" class="chat-log"></div>
+    <input id="chatInput" class="chat-input" placeholder="チャットを入力してEnter" />
+  </div>
   <script src="client.js"></script>
 </body>
 </html>

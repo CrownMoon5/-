@@ -22,10 +22,22 @@
   const btnCpu = document.getElementById('btnCpu');
   const btnOnline = document.getElementById('btnOnline');
   const playerNameInput = document.getElementById('playerName');
+  const weaponSelect = document.getElementById('weaponSelect');
+  const costumeSelect = document.getElementById('costumeSelect');
+  const noBotsCheckbox = document.getElementById('noBotsCheckbox');
+  const teamMatchCheckbox = document.getElementById('teamMatchCheckbox');
+  const roundsCheckbox = document.getElementById('roundsCheckbox');
+  const returnHomeBtn = document.getElementById('returnHomeBtn');
   let selectedMode = null; // 'cpu' or 'online'
   let playerName = '';
+  let playerWeapon = 'smg';
+  let playerCostume = 'default';
+  let followId = null; // spectator follow target
+  let currentWeaponSlot = 1; // 1 or 2
 
   let lastSend = 0;
+  let prevRoundWinner = null;
+  state.match = { inRound:false, roundWinner: null, targetKills: 9 };
 
   canvas.addEventListener('mousemove', (e)=>{
     mouse.x = e.clientX; mouse.y = e.clientY;
@@ -43,7 +55,12 @@
     ws.onopen = ()=>{ info.textContent = 'Connected (' + (mode==='cpu'? 'CPU戦' : 'オンライン') +')'; };
     // send chosen player name right after open
     ws.addEventListener('open', ()=>{
-      if (playerName) ws.send(JSON.stringify({ type:'setName', name: playerName }));
+      if (playerName) ws.send(JSON.stringify({ type:'setName', name: playerName, weapon: playerWeapon, costume: playerCostume }));
+      // send options like noBots/team/rounds for online mode
+      const noBots = !!(noBotsCheckbox && noBotsCheckbox.checked);
+      const teamMatch = !!(teamMatchCheckbox && teamMatchCheckbox.checked);
+      const rounds = !!(roundsCheckbox && roundsCheckbox.checked);
+      ws.send(JSON.stringify({ type:'setOptions', options: { noBots, teamMatch, rounds, mode: selectedMode } }));
     });
     ws.onmessage = (msg)=>{
       try{
@@ -54,6 +71,18 @@
         if (data.type === 'snapshot'){
           state.players = data.players;
           state.bullets = data.bullets;
+          // update match info
+          if (data.match) state.match = data.match;
+          // if round ended, and we haven't processed it yet, show winner message (do NOT disconnect)
+          if (data.match && data.match.roundWinner){
+            const winnerId = data.match.roundWinner;
+            if (prevRoundWinner !== winnerId){
+              prevRoundWinner = winnerId;
+              const w = (data.players || []).find(p=>p.id===winnerId);
+              const winnerName = w ? (w.name || w.id) : winnerId;
+              info.textContent = `ラウンド終了 - 勝者: ${winnerName} （次ラウンドへ移行します）`;
+            }
+          }
           // dynamic obstacle updates
           if (data.obstacles) obstacles = data.obstacles;
         }
@@ -94,14 +123,39 @@
     keys.build = false; keys.buildAt = null;
   }
 
+  // weapon slot switching: 1 = selected weapon (from dropdown), 2 = knife
+  window.addEventListener('keydown', (e)=>{
+    if (e.key === '1'){
+      currentWeaponSlot = 1;
+      playerWeapon = (weaponSelect && weaponSelect.value) ? weaponSelect.value : 'smg';
+      if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type:'setWeapon', weapon: playerWeapon }));
+    }
+    if (e.key === '2'){
+      currentWeaponSlot = 2;
+      playerWeapon = 'knife';
+      if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type:'setWeapon', weapon: 'knife' }));
+    }
+  });
+
   function draw(){
     ctx.fillStyle = '#0b1220';
     ctx.fillRect(0,0,W,H);
 
     const me = state.players.find(x=>x.id===myId) || { x:W/2, y:H/2 };
-    // camera translate so that me is center
-    const ox = W/2 - me.x;
-    const oy = H/2 - me.y;
+    // decide camera target: if spectator follow selected player
+    let cameraTarget = me;
+    if (me && me.spectator){
+      // ensure followId exists
+      if (!followId){
+        const alive = state.players.filter(p=>!p.spectator && p.hp>0);
+        if (alive.length) followId = alive[0].id;
+      }
+      const f = state.players.find(x=>x.id===followId);
+      if (f) cameraTarget = f;
+    }
+    // camera translate so that cameraTarget is center
+    const ox = W/2 - cameraTarget.x;
+    const oy = H/2 - cameraTarget.y;
 
     // draw map background grid
     ctx.save();
@@ -142,7 +196,13 @@
       ctx.translate(p.x, p.y);
       ctx.rotate(p.angle || 0);
       // body
-      ctx.fillStyle = p.isBot ? '#aa66ff' : (isMe? '#66ccff' : '#88ff88');
+  // color by costume
+  let bodyColor = '#88ff88';
+  if (p.costume === 'red') bodyColor = '#ff6b6b';
+  else if (p.costume === 'blue') bodyColor = '#6b9cff';
+  else if (p.isBot) bodyColor = '#aa66ff';
+  else if (isMe) bodyColor = '#66ccff';
+  ctx.fillStyle = bodyColor;
       ctx.beginPath(); ctx.rect(-12, -12, 24, 24); ctx.fill();
       // barrel
       ctx.fillStyle = '#222'; ctx.fillRect(0, -4, 20, 8);
@@ -166,7 +226,27 @@
 
     // HUD
     const my = state.players.find(x=>x.id===myId);
-    if (my){ info.textContent = `ID: ${myId} ${my.isBot? '(bot?)':''} HP:${Math.round(my.hp)} `; scoreEl.textContent = `Score: ${my.score || 0}`; }
+    if (my){
+      let txt = `ID: ${myId} ${my.isBot? '(bot?)':''} HP:${Math.round(my.hp)} `;
+      if (my.spectator){
+        const f = state.players.find(x=>x.id===followId);
+        if (f) txt += ` | Following: ${f.name || f.id}`;
+      }
+      // remaining enemies (alive and not spectator) excluding self
+      const alive = state.players.filter(p=>p.hp>0 && !p.spectator);
+      const remaining = Math.max(0, alive.length - 1);
+      txt += ` | 残り: ${remaining}`;
+      info.textContent = txt;
+      scoreEl.textContent = `Score: ${my.score || 0}`;
+    }
+
+    // Show return-to-home button when we are a spectator
+    try {
+      if (returnHomeBtn) {
+        if (my && my.spectator) returnHomeBtn.style.display = 'block';
+        else returnHomeBtn.style.display = 'none';
+      }
+    } catch(e){}
 
     drawMapOverlay();
     requestAnimationFrame(draw);
@@ -200,6 +280,39 @@
     ctx.restore();
   }
 
+  // small minimap always shown at top-right
+  function drawMiniMap(){
+    try{
+      const mw = Math.min(200, Math.max(120, Math.floor(Math.min(W, H) * 0.18)));
+      const mh = Math.min(200, Math.max(120, Math.floor(Math.min(W, H) * 0.18)));
+      const pad = 12;
+      const x = W - mw - pad;
+      const y = pad;
+      ctx.save();
+      ctx.globalAlpha = 0.95;
+      ctx.fillStyle = 'rgba(0,0,0,0.5)';
+      ctx.fillRect(x,y,mw,mh);
+      const sx = mw / map.w;
+      const sy = mh / map.h;
+      // draw obstacles
+      ctx.fillStyle = '#666';
+      for (const ob of obstacles){ ctx.fillRect(x + ob.x*sx, y + ob.y*sy, Math.max(1, ob.w*sx), Math.max(1, ob.h*sy)); }
+      // draw bullets
+      ctx.fillStyle = '#ffd700';
+      for (const b of state.bullets){ const bx = x + b.x*sx; const by = y + b.y*sy; ctx.fillRect(bx-1, by-1, 2, 2); }
+      // draw players
+      for (const p of state.players){
+        const px = x + p.x*sx; const py = y + p.y*sy;
+        ctx.fillStyle = p.isBot ? '#aa66ff' : (p.id===myId ? '#66ccff' : '#88ff88');
+        ctx.beginPath(); ctx.arc(px, py, 3, 0, Math.PI*2); ctx.fill();
+        if (p.spectator){ ctx.fillStyle = 'rgba(255,255,255,0.5)'; ctx.fillText('S', px+4, py+4); }
+      }
+      // border
+      ctx.strokeStyle = 'rgba(255,255,255,0.12)'; ctx.strokeRect(x,y,mw,mh);
+      ctx.restore();
+    }catch(e){}
+  }
+
   // toggle map view with 'm'
   window.addEventListener('keydown', (e)=>{
     if (e.key === 'm' || e.key === 'M'){
@@ -217,12 +330,25 @@
     }
     if (e.code === 'Space') keys.jump = true;
     if (e.key === 'Shift') keys.slide = true;
+    // spectator follow cycle
+    if (e.key === 'ArrowRight') cycleFollow(1);
+    if (e.key === 'ArrowLeft') cycleFollow(-1);
   });
   window.addEventListener('keyup', (e)=>{
     if (e.key === 'q' || e.key === 'Q') keys.special = false;
     if (e.code === 'Space') keys.jump = false;
     if (e.key === 'Shift') keys.slide = false;
   });
+
+  function cycleFollow(dir){
+    const me = state.players.find(x=>x.id===myId);
+    const alive = state.players.filter(p=>!p.spectator && p.hp>0);
+    if (!alive.length) return;
+    let idx = alive.findIndex(p=>p.id===followId);
+    if (idx === -1) idx = 0;
+    idx = (idx + dir + alive.length) % alive.length;
+    followId = alive[idx].id;
+  }
 
   // draw map overlay when showMap is true
   const origDraw = draw;
@@ -236,12 +362,34 @@
   // home button handlers
   btnCpu.addEventListener('click', ()=>{
     playerName = (playerNameInput && playerNameInput.value) ? playerNameInput.value : '';
+    playerWeapon = (weaponSelect && weaponSelect.value) ? weaponSelect.value : 'smg';
+    playerCostume = (costumeSelect && costumeSelect.value) ? costumeSelect.value : 'default';
     home.style.display = 'none';
     connect('cpu');
   });
   btnOnline.addEventListener('click', ()=>{
     playerName = (playerNameInput && playerNameInput.value) ? playerNameInput.value : '';
+    playerWeapon = (weaponSelect && weaponSelect.value) ? weaponSelect.value : 'smg';
+    playerCostume = (costumeSelect && costumeSelect.value) ? costumeSelect.value : 'default';
     home.style.display = 'none';
     connect('online');
   });
+
+  // return-to-home button handler (for spectators)
+  if (returnHomeBtn) {
+    returnHomeBtn.addEventListener('click', ()=>{
+      // show home overlay so player can choose mode and rejoin
+      home.style.display = 'flex';
+      // close current connection if any (this will remove the old player on server)
+      try{ if (ws) ws.close(); }catch(e){}
+      ws = null;
+      // reset local state so UI doesn't show stale players
+      state.players = [];
+      state.bullets = [];
+      followId = null;
+      info.textContent = 'ホームに戻りました';
+      // hide the button until spectator state is detected again
+      returnHomeBtn.style.display = 'none';
+    });
+  }
 })();

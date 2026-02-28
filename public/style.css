@@ -12,3 +12,11 @@ html,body{height:100%;margin:0;background:#111;}
 #home button{padding:10px 14px;border-radius:6px;border:0;background:#2b90ff;color:#fff;font-weight:600;cursor:pointer}
 #home button#btnCpu{background:#6b3aff}
 #home .hint{margin-top:10px;font-size:12px;color:#bbb}
+
+/* Return to Home button shown when spectator */
+#returnHomeBtn{font-family:Arial,Helvetica,sans-serif;box-shadow:0 2px 6px rgba(0,0,0,0.4)}
+
+/* Chat */
+.chat{position:fixed;right:12px;bottom:12px;width:320px;z-index:60;font-family:Arial,Helvetica,sans-serif}
+.chat-log{height:180px;background:rgba(0,0,0,0.6);color:#fff;padding:8px;overflow:auto;border-radius:6px;margin-bottom:6px;font-size:13px}
+.chat-input{width:100%;padding:8px;border-radius:6px;border:0}
