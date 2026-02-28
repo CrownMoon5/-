@@ -1,0 +1,16 @@
+{
+  "name": "battle-area",
+  "version": "0.1.0",
+  "description": "Battle Area - simple top-down 2D battle with online and CPU bots",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "express": "^4.18.2",
+    "ws": "^8.13.0"
+  },
+  "engines": {
+    "node": ">=14"
+  }
+}
