@@ -43,6 +43,8 @@ const botStats = new Map();
 // options per client (e.g., noBots)
 const clientOptions = new Map();
 let allowBots = true; // if false, do not spawn bots in ensureMinPlayers
+// recent kills buffer (kept short)
+const recentKills = [];
 
 function recomputeAllowBots(){
   // Disable bots if any connected human requests online mode or noBots
@@ -183,7 +185,7 @@ function startRoundIfNeeded() {
   match.roundWinner = null;
   match.initialPlayers = Array.from(players.values()).filter(p=>p.hp>0).map(p=>p.id);
   // targetKills is 9 or the number of other players if fewer
-  match.targetKills = Math.min(9, Math.max(1, match.initialPlayers.length - 1));
+  match.targetKills = 1
   // reset scores for all players at start
   for (const p of players.values()) p.score = 0;
   console.log('Round started, targetKills=', match.targetKills, 'players=', match.initialPlayers.length);
@@ -224,7 +226,7 @@ function endRound(winnerId){
     match.currentRound = (match.currentRound || 0) + 1;
     match.inRound = true;
     match.initialPlayers = Array.from(players.values()).filter(p=>p.hp>0).map(p=>p.id);
-    match.targetKills = Math.min(9, Math.max(1, match.initialPlayers.length - 1));
+    match.targetKills = 1;
     match.roundTimeLeft = 0;
     console.log('Next round started, targetKills=', match.targetKills, 'players=', match.initialPlayers.length);
     match.nextRoundTimeout = null;
@@ -490,14 +492,21 @@ function update(dt){
         p.hp -= dmg;
         if (p.hp <= 0) {
           p.hp = 0;
-            const owner = players.get(b.owner);
+              const owner = players.get(b.owner);
             if (owner) {
               owner.score += 1;
-              // If a round is active, check for win condition
-              if (match.inRound && !match.roundWinner && owner.score >= (match.targetKills || 9)){
-                // owner wins the round
-                endRound(owner.id);
-              }
+                // record kill event (timestamp ms)
+                const ev = { victim: p.id, victimName: p.name, killer: owner.id, killerName: owner.name, t: Date.now() };
+                recentKills.push(ev);
+                // trim old kills (keep last 20)
+                if (recentKills.length > 40) recentKills.splice(0, recentKills.length - 40);
+                // compute current alive count and store in match
+                const aliveCountNow = Array.from(players.values()).filter(x=>x.hp>0).length;
+                match.aliveCount = aliveCountNow;
+                // New win condition: aliveCount < 2 AND owner is present and alive
+                if (match.inRound && !match.roundWinner && match.aliveCount < 2 && players.has(owner.id) && owner.hp > 0){
+                  endRound(owner.id);
+                }
             }
           // respawn after a short delay handled below
         }
@@ -589,13 +598,24 @@ setInterval(()=>{
 
 // Broadcast
 setInterval(()=>{
+  const playersArr = Array.from(players.values());
   const snapshot = {
     type: 'snapshot',
     t: Date.now(),
-    players: Array.from(players.values()).map(p=>({ id:p.id, x:p.x, y:p.y, hp:p.hp, score:p.score, angle:p.angle, isBot:p.isBot, spectator: !!p.spectator, name: p.name, jumping: !!p.jumping, sliding: !!p.sliding, weapon: p.weapon, costume: p.costume })),
+    players: playersArr.map(p=>({ id:p.id, x:p.x, y:p.y, hp:p.hp, score:p.score, angle:p.angle, isBot:p.isBot, spectator: !!p.spectator, name: p.name, jumping: !!p.jumping, sliding: !!p.sliding, weapon: p.weapon, costume: p.costume })),
     bullets: Array.from(bullets.values()).map(b=>({ id:b.id, x:b.x, y:b.y, type: b.type })),
-    obstacles: obstacles.map(o=>({ id:o.id, x:o.x, y:o.y, w:o.w, h:o.h }))
-    , match: { inRound: !!match.inRound, roundWinner: match.roundWinner, targetKills: match.targetKills, roundTimeLeft: match.roundTimeLeft || 0 }
+    obstacles: obstacles.map(o=>({ id:o.id, x:o.x, y:o.y, w:o.w, h:o.h })),
+    match: {
+      inRound: !!match.inRound,
+      roundWinner: match.roundWinner,
+      targetKills: match.targetKills,
+      roundTimeLeft: match.roundTimeLeft || 0,
+      playerCount: playersArr.length,
+      aliveCount: playersArr.filter(p=>p.hp>0).length,
+      humanCount: playersArr.filter(p=>!p.isBot).length,
+      players: playersArr.map(p=>({ id:p.id, x:p.x, y:p.y, hp:p.hp, score:p.score, angle:p.angle, isBot:p.isBot, spectator: !!p.spectator, name: p.name, jumping: !!p.jumping, sliding: !!p.sliding, weapon: p.weapon, costume: p.costume })),
+      kills: recentKills.slice(-20)
+    }
   };
   const str = JSON.stringify(snapshot);
   wss.clients.forEach(function each(client){

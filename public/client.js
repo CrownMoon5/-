@@ -38,6 +38,24 @@
   let lastSend = 0;
   let prevRoundWinner = null;
   state.match = { inRound:false, roundWinner: null, targetKills: 9 };
+  let winnerDisplayUntil = 0;
+  let winnerNameLocal = '';
+  let killedDisplayUntil = 0;
+  let killedByNameLocal = '';
+  let lastKillT = 0;
+  const chatLog = document.getElementById('chatLog');
+
+  function appendChatMessage(text){
+    try{
+      if (!chatLog) return;
+      const el = document.createElement('div');
+      el.textContent = text;
+      el.style.padding = '4px 6px';
+      el.style.borderBottom = '1px solid rgba(255,255,255,0.03)';
+      chatLog.appendChild(el);
+      chatLog.scrollTop = chatLog.scrollHeight;
+    }catch(e){}
+  }
 
   canvas.addEventListener('mousemove', (e)=>{
     mouse.x = e.clientX; mouse.y = e.clientY;
@@ -81,10 +99,31 @@
               const w = (data.players || []).find(p=>p.id===winnerId);
               const winnerName = w ? (w.name || w.id) : winnerId;
               info.textContent = `ラウンド終了 - 勝者: ${winnerName} （次ラウンドへ移行します）`;
+              // show winner prominently for 2 seconds before showing countdown
+              winnerNameLocal = winnerName;
+              winnerDisplayUntil = (Date.now()/1000) + 2;
             }
           }
           // dynamic obstacle updates
           if (data.obstacles) obstacles = data.obstacles;
+          // process recent kills and show chat messages
+          if (data.match && data.match.kills && Array.isArray(data.match.kills)){
+            // sort by timestamp to process in order
+            const sorted = data.match.kills.slice().sort((a,b)=>a.t - b.t);
+            for (const k of sorted){
+              if (!k.t) continue;
+              if (k.t <= lastKillT) continue;
+              lastKillT = Math.max(lastKillT, k.t);
+              const vName = k.victimName || k.victim;
+              const kName = k.killerName || k.killer;
+              appendChatMessage(`${vName}が${kName}によってキルされました`);
+              // if I'm the victim, show local killed overlay for 2 seconds
+              if (myId && k.victim === myId){
+                killedByNameLocal = kName;
+                killedDisplayUntil = (Date.now()/1000) + 2;
+              }
+            }
+          }
         }
       }catch(e){}
     };
@@ -245,6 +284,32 @@
       if (returnHomeBtn) {
         if (my && my.spectator) returnHomeBtn.style.display = 'block';
         else returnHomeBtn.style.display = 'none';
+      }
+    } catch(e){}
+
+    // winner display (2s) then inter-round countdown overlay (center)
+    try {
+      const nowSec = Date.now()/1000;
+      if (winnerDisplayUntil && nowSec < winnerDisplayUntil){
+        // show winner overlay
+        ctx.save();
+        ctx.fillStyle = 'rgba(0,0,0,0.75)';
+        const bw = 480, bh = 140;
+        ctx.fillRect((W-bw)/2, (H-bh)/2, bw, bh);
+        ctx.fillStyle = '#ffd700'; ctx.font = '22px Arial'; ctx.textAlign='center';
+        ctx.fillText('ラウンド勝者', W/2, (H-bh)/2 + 38);
+        ctx.fillStyle = '#fff'; ctx.font = '48px Arial'; ctx.fillText(winnerNameLocal, W/2, H/2 + 10);
+        ctx.restore();
+      } else if (state.match && state.match.roundTimeLeft && state.match.roundTimeLeft > 0){
+        const secs = Math.ceil(state.match.roundTimeLeft);
+        ctx.save();
+        ctx.fillStyle = 'rgba(0,0,0,0.7)';
+        const bw = 360, bh = 120;
+        ctx.fillRect((W-bw)/2, (H-bh)/2, bw, bh);
+        ctx.fillStyle = '#fff'; ctx.font = '20px Arial'; ctx.textAlign='center';
+        ctx.fillText('次のラウンド開始まで', W/2, (H-bh)/2 + 36);
+        ctx.font = '64px Arial'; ctx.fillText(String(secs), W/2, H/2 + 22);
+        ctx.restore();
       }
     } catch(e){}
 
