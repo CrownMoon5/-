@@ -21,6 +21,7 @@
   const home = document.getElementById('home');
   const btnCpu = document.getElementById('btnCpu');
   const btnOnline = document.getElementById('btnOnline');
+  const gameModeSelect = document.getElementById('gameModeSelect');
   const playerNameInput = document.getElementById('playerName');
   const weaponSelect = document.getElementById('weaponSelect');
   const costumeSelect = document.getElementById('costumeSelect');
@@ -44,6 +45,8 @@
   let killedByNameLocal = '';
   let lastKillT = 0;
   const chatLog = document.getElementById('chatLog');
+  // FPS meter
+  let frameCount = 0; let fps = 0; let lastFpsTime = Date.now();
 
   function appendChatMessage(text){
     try{
@@ -77,8 +80,9 @@
       // send options like noBots/team/rounds for online mode
       const noBots = !!(noBotsCheckbox && noBotsCheckbox.checked);
       const teamMatch = !!(teamMatchCheckbox && teamMatchCheckbox.checked);
-      const rounds = !!(roundsCheckbox && roundsCheckbox.checked);
-      ws.send(JSON.stringify({ type:'setOptions', options: { noBots, teamMatch, rounds, mode: selectedMode } }));
+        const rounds = !!(roundsCheckbox && roundsCheckbox.checked);
+        const modeSelectVal = (gameModeSelect && gameModeSelect.value) ? gameModeSelect.value : 'deathmatch';
+        ws.send(JSON.stringify({ type:'setOptions', options: { noBots, teamMatch, rounds, mode: modeSelectVal } }));
     });
     ws.onmessage = (msg)=>{
       try{
@@ -87,10 +91,16 @@
           myId = data.id; map = data.map; obstacles = data.obstacles || [];
         }
         if (data.type === 'snapshot'){
+          // Update snapshot state: players, bullets, obstacles, match
+          // Keep match.flags from server if provided (some servers send flags at top-level)
           state.players = data.players;
           state.bullets = data.bullets;
-          // update match info
-          if (data.match) state.match = data.match;
+          if (data.match) {
+            state.match = data.match;
+          }
+          // flags may be provided either in data.flags or data.match.flags; prefer match.flags
+          if (data.match && data.match.flags) state.match.flags = data.match.flags;
+          else if (data.flags) state.match.flags = data.flags;
           // if round ended, and we haven't processed it yet, show winner message (do NOT disconnect)
           if (data.match && data.match.roundWinner){
             const winnerId = data.match.roundWinner;
@@ -124,6 +134,9 @@
               }
             }
           }
+          // update our team id for UI
+          const me = state.players.find(x=>x.id===myId);
+          state.myTeam = (me && ('team' in me)) ? me.team : null;
         }
       }catch(e){}
     };
@@ -177,8 +190,17 @@
   });
 
   function draw(){
+    // If tab is hidden, throttle rendering to save CPU
+    if (document.hidden) { setTimeout(()=>{ requestAnimationFrame(draw); }, 500); return; }
+
+    // === 1) clear screen ===
     ctx.fillStyle = '#0b1220';
     ctx.fillRect(0,0,W,H);
+
+    // FPS counter (update once per 500ms)
+    frameCount++;
+    const nowMs = Date.now();
+    if (nowMs - lastFpsTime >= 500){ fps = Math.round((frameCount*1000)/(nowMs - lastFpsTime)); frameCount = 0; lastFpsTime = nowMs; }
 
     const me = state.players.find(x=>x.id===myId) || { x:W/2, y:H/2 };
     // decide camera target: if spectator follow selected player
@@ -196,9 +218,9 @@
     const ox = W/2 - cameraTarget.x;
     const oy = H/2 - cameraTarget.y;
 
-    // draw map background grid
-    ctx.save();
-    ctx.translate(ox, oy);
+  // === 2) world transform: translate so cameraTarget is centered ===
+  ctx.save();
+  ctx.translate(ox, oy);
 
     // grid
     ctx.strokeStyle = '#102233'; ctx.lineWidth = 1;
@@ -234,14 +256,28 @@
       ctx.save();
       ctx.translate(p.x, p.y);
       ctx.rotate(p.angle || 0);
-      // body
-  // color by costume
-  let bodyColor = '#88ff88';
-  if (p.costume === 'red') bodyColor = '#ff6b6b';
-  else if (p.costume === 'blue') bodyColor = '#6b9cff';
-  else if (p.isBot) bodyColor = '#aa66ff';
-  else if (isMe) bodyColor = '#66ccff';
-  ctx.fillStyle = bodyColor;
+      // body color by team when teamMatch active
+      let bodyColor = '#88ff88';
+      if (state.match && state.match.playerCount && ('players' in state.match)){
+        // team mode
+        if (typeof p.team === 'number'){
+          const myTeam = state.myTeam;
+          const teamColors = ['#66ccff', '#ff6b6b'];
+          if (myTeam !== null && myTeam !== undefined){
+            bodyColor = (p.team === myTeam) ? teamColors[0] : teamColors[1];
+          } else {
+            // no local team known: color by team id
+            bodyColor = (p.team === 0) ? teamColors[0] : teamColors[1];
+          }
+        } else {
+          // fallback to costume/bot/own coloring
+          if (p.costume === 'red') bodyColor = '#ff6b6b';
+          else if (p.costume === 'blue') bodyColor = '#6b9cff';
+          else if (p.isBot) bodyColor = '#aa66ff';
+          else if (isMe) bodyColor = '#66ccff';
+        }
+      }
+      ctx.fillStyle = bodyColor;
       ctx.beginPath(); ctx.rect(-12, -12, 24, 24); ctx.fill();
       // barrel
       ctx.fillStyle = '#222'; ctx.fillRect(0, -4, 20, 8);
@@ -260,7 +296,33 @@
       const w = Math.max(0, (p.hp/ (p.maxHp || 100)) * 40);
       ctx.fillRect(p.x-20, p.y-28, w, 6);
     }
+    // === 3) draw flags (if any) in world space ===
+    try{
+      if (state.match && state.match.flags && Array.isArray(state.match.flags)){
+        const flagRadius = (state.match.flagRadius !== undefined) ? state.match.flagRadius : 72;
+        for (const f of state.match.flags){
+          const fx = f.x, fy = f.y;
+          // outer capture radius (stroke)
+          ctx.beginPath(); ctx.arc(fx, fy, flagRadius, 0, Math.PI*2);
+          ctx.strokeStyle = 'rgba(200,200,200,0.08)'; ctx.lineWidth = 2; ctx.stroke();
+          // flag base circle
+          ctx.beginPath(); ctx.arc(fx, fy, 18, 0, Math.PI*2);
+          const teamColors = ['#66ccff', '#ff6b6b'];
+          if (f.ownerTeam === 0) ctx.fillStyle = teamColors[0];
+          else if (f.ownerTeam === 1) ctx.fillStyle = teamColors[1];
+          else ctx.fillStyle = 'rgba(255,255,255,0.06)';
+          ctx.fill();
+          // capture progress arc just outside base
+          if (f.captureTeam !== undefined && f.captureTeam !== null){
+            const pct = Math.min(1, (f.captureTimer || 0) / (state.match.flagCaptureTime || 3));
+            ctx.strokeStyle = (f.captureTeam === state.myTeam) ? '#66ccff' : '#ff6b6b';
+            ctx.lineWidth = 3; ctx.beginPath(); ctx.arc(fx, fy, 26, -Math.PI/2, -Math.PI/2 + Math.PI*2*pct); ctx.stroke();
+          }
+        }
+      }
+    }catch(e){}
 
+    // restore world transform
     ctx.restore();
 
     // HUD
@@ -290,7 +352,20 @@
     // winner display (2s) then inter-round countdown overlay (center)
     try {
       const nowSec = Date.now()/1000;
-      if (winnerDisplayUntil && nowSec < winnerDisplayUntil){
+      // if team winner present, show team winner overlay
+      if (state.match && state.match.roundWinnerTeam !== undefined && state.match.roundWinnerTeam !== null){
+        const team = state.match.roundWinnerTeam;
+        const teamNames = ['あなたのチーム', '相手チーム'];
+        const teamColors = ['#66ccff', '#ff6b6b'];
+        ctx.save();
+        ctx.fillStyle = 'rgba(0,0,0,0.75)';
+        const bw = 480, bh = 140;
+        ctx.fillRect((W-bw)/2, (H-bh)/2, bw, bh);
+        ctx.fillStyle = teamColors[team] || '#fff'; ctx.font = '22px Arial'; ctx.textAlign='center';
+        ctx.fillText('ラウンド勝者 (チーム)', W/2, (H-bh)/2 + 38);
+        ctx.fillStyle = '#fff'; ctx.font = '48px Arial'; ctx.fillText(team === state.myTeam ? 'あなたのチーム' : '敵チーム', W/2, H/2 + 10);
+        ctx.restore();
+      } else if (winnerDisplayUntil && nowSec < winnerDisplayUntil){
         // show winner overlay
         ctx.save();
         ctx.fillStyle = 'rgba(0,0,0,0.75)';
@@ -312,6 +387,28 @@
         ctx.restore();
       }
     } catch(e){}
+
+    // show killed-by overlay for the local player (2s)
+    try{
+      const nowSec2 = Date.now()/1000;
+      if (killedDisplayUntil && nowSec2 < killedDisplayUntil){
+        ctx.save();
+        ctx.fillStyle = 'rgba(0,0,0,0.7)';
+        const bw = 420, bh = 80;
+        ctx.fillRect((W-bw)/2, (H-bh)/2 + 120, bw, bh);
+        ctx.fillStyle = '#ff6b6b'; ctx.font = '20px Arial'; ctx.textAlign='center';
+        ctx.fillText(`あなたは ${killedByNameLocal} によってキルされました`, W/2, (H-bh)/2 + 160);
+        ctx.restore();
+      }
+    }catch(e){}
+
+    // === 5) draw FPS meter ===
+    try{
+      ctx.save();
+      ctx.fillStyle = 'rgba(0,0,0,0.45)'; ctx.fillRect(8,8,72,28);
+      ctx.fillStyle = '#fff'; ctx.font = '12px Arial'; ctx.textAlign = 'left'; ctx.fillText(`FPS: ${fps}`, 14, 26);
+      ctx.restore();
+    }catch(e){}
 
     drawMapOverlay();
     requestAnimationFrame(draw);
@@ -368,7 +465,15 @@
       // draw players
       for (const p of state.players){
         const px = x + p.x*sx; const py = y + p.y*sy;
-        ctx.fillStyle = p.isBot ? '#aa66ff' : (p.id===myId ? '#66ccff' : '#88ff88');
+        let miniColor = '#88ff88';
+        if (typeof p.team === 'number'){
+          const myTeam = state.myTeam;
+          const teamColors = ['#66ccff', '#ff6b6b'];
+          miniColor = (myTeam !== null && myTeam !== undefined) ? (p.team === myTeam ? teamColors[0] : teamColors[1]) : (p.team === 0 ? teamColors[0] : teamColors[1]);
+        } else {
+          miniColor = p.isBot ? '#aa66ff' : (p.id===myId ? '#66ccff' : '#88ff88');
+        }
+        ctx.fillStyle = miniColor;
         ctx.beginPath(); ctx.arc(px, py, 3, 0, Math.PI*2); ctx.fill();
         if (p.spectator){ ctx.fillStyle = 'rgba(255,255,255,0.5)'; ctx.fillText('S', px+4, py+4); }
       }

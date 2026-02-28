@@ -35,6 +35,14 @@
         </select>
       </p>
       <p style="margin-top:8px">
+        <label style="font-size:13px;color:#ddd">ゲームモード:
+          <select id="gameModeSelect" style="padding:6px;border-radius:6px;border:0;margin-left:8px">
+            <option value="deathmatch">Deathmatch</option>
+            <option value="flagHill">Flag Hill</option>
+          </select>
+        </label>
+      </p>
+      <p style="margin-top:8px">
         <label style="font-size:13px;color:#ddd"><input type="checkbox" id="noBotsCheckbox" /> オンライン時にボットを表示しない</label>
       </p>
       <p style="margin-top:8px">
@@ -55,6 +63,8 @@
     <div id="chatLog" class="chat-log"></div>
     <input id="chatInput" class="chat-input" placeholder="チャットを入力してEnter" />
   </div>
+  <script src="https://unpkg.com/three@0.152.0/build/three.min.js"></script>
+  <script src="https://unpkg.com/three@0.152.0/examples/js/controls/OrbitControls.js"></script>
   <script src="client.js"></script>
 </body>
 </html>

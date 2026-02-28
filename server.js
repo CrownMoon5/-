@@ -13,8 +13,8 @@ app.use(express.static(path.join(__dirname, 'public')));
 // Game constants
 const TICK_RATE = 20; // 20 updates per second
 const BROADCAST_RATE = 20; // 20 sends per second
-const MAP_W = 2000;
-const MAP_H = 2000;
+let MAP_W = 2000;
+let MAP_H = 2000;
 const MIN_PLAYERS = 10;
 
 let nextId = 1;
@@ -33,6 +33,14 @@ const match = {
   teamMatch: false,
   teamScores: [0,0]
 };
+// mode: 'deathmatch' or 'flagHill'
+match.mode = 'deathmatch';
+// for flag hill mode
+match.flags = [];
+match.flagRadius = 72; // ~3 blocks
+match.flagCaptureTime = 3; // seconds required to capture
+match.allFlagsHoldTimer = [0,0]; // time each team holds all flags continuously
+match.roundWinnerTeam = null;
 // additional round fields
 match.roundWinner = null; // id of winner when round ends
 match.targetKills = 9; // number of kills required to win (default 9)
@@ -75,11 +83,35 @@ let obstacles = [
   { x: 1500, y: 400, w: 60, h: 400 }
 ];
 
-// spawn points to use for safe spawning
-const spawnPoints = [
-  { x: 200, y: 200 }, { x: 1800, y: 200 }, { x: 200, y: 1800 }, { x: 1800, y: 1800 },
-  { x: 1000, y: 200 }, { x: 1000, y: 1800 }, { x: 200, y: 1000 }, { x: 1800, y: 1000 }
-];
+// spawn points will be computed from current MAP_W / MAP_H
+let spawnPoints = [];
+
+function computeSpawnPoints(){
+  const margin = Math.min(200, Math.floor(Math.min(MAP_W, MAP_H) * 0.1));
+  spawnPoints = [
+    { x: margin, y: margin },
+    { x: MAP_W - margin, y: margin },
+    { x: margin, y: MAP_H - margin },
+    { x: MAP_W - margin, y: MAP_H - margin },
+    { x: Math.floor(MAP_W/2), y: margin },
+    { x: Math.floor(MAP_W/2), y: MAP_H - margin },
+    { x: margin, y: Math.floor(MAP_H/2) },
+    { x: MAP_W - margin, y: Math.floor(MAP_H/2) }
+  ];
+}
+computeSpawnPoints();
+
+function setMapSize(label){
+  // Accepts 'small','medium','large' or numeric value
+  const mapSizes = { small: 1000, medium: 2000, large: 3000 };
+  if (typeof label === 'string' && mapSizes[label]){
+    MAP_W = mapSizes[label]; MAP_H = mapSizes[label];
+  } else if (typeof label === 'number'){
+    MAP_W = Math.max(600, Math.floor(label)); MAP_H = Math.max(600, Math.floor(label));
+  }
+  computeSpawnPoints();
+  console.log('Map size set to', MAP_W, MAP_H);
+}
 
 function getSpawnPosition(){
   // try spawn points first, pick one with enough distance from other players and not inside obstacle
@@ -130,6 +162,7 @@ function createPlayer(isBot = false) {
     weapon: isBot ? (Math.random()<0.7? 'smg' : 'sniper') : 'smg',
     costume: 'default'
   };
+  p.team = null; // team id (0 or 1) when teamMatch active
   if (isBot) p.botStats = { shots:0, hits:0, kills:0 };
   players.set(id, p);
   return p;
@@ -137,8 +170,34 @@ function createPlayer(isBot = false) {
 
 function spawnBot() {
   const bot = createPlayer(true);
-  console.log('spawn bot', bot.id);
+  // assign team if teamMatch enabled
+  if (match.teamMatch) assignTeamToPlayer(bot);
+  console.log('spawn bot', bot.id, 'team=', bot.team);
   return bot;
+}
+
+function assignTeamToPlayer(p){
+  // balance team sizes (humans+bots)
+  const counts = [0,0];
+  for (const pl of players.values()){
+    if (pl.team === 0) counts[0]++; else if (pl.team === 1) counts[1]++;
+  }
+  // choose smaller team (or random if equal)
+  if (counts[0] <= counts[1]) p.team = 0; else p.team = 1;
+}
+
+function assignTeams(){
+  // assign all players to teams balancing humans and bots
+  const arr = Array.from(players.values());
+  // reset counts
+  let c0 = 0, c1 = 0;
+  for (const p of arr){
+    if (p.team === null) {
+      if (c0 <= c1){ p.team = 0; c0++; } else { p.team = 1; c1++; }
+    } else {
+      if (p.team === 0) c0++; else c1++;
+    }
+  }
 }
 
 function ensureMinPlayers() {
@@ -177,6 +236,18 @@ function startRoundIfNeeded() {
     p.y = Math.random() * MAP_H;
     p.score = 0;
   }
+  // if team match enabled, assign teams now
+  if (match.teamMatch) assignTeams();
+  // initialize flags if flagHill mode
+  if (match.mode === 'flagHill' && (!match.flags || match.flags.length === 0)){
+    match.flags = [
+      { id: 'f1', x: MAP_W*0.5, y: MAP_H*0.25, ownerTeam: null, captureTeam: null, captureTimer: 0 },
+      { id: 'f2', x: MAP_W*0.25, y: MAP_H*0.75, ownerTeam: null, captureTeam: null, captureTimer: 0 },
+      { id: 'f3', x: MAP_W*0.75, y: MAP_H*0.75, ownerTeam: null, captureTeam: null, captureTimer: 0 }
+    ];
+    match.allFlagsHoldTimer = [0,0];
+    match.roundWinnerTeam = null;
+  }
   // clear bullets and temporary obstacles
   bullets.clear();
   obstacles = obstacles.filter(o=>!o.owner);
@@ -195,6 +266,7 @@ function endRound(winnerId){
   if (!match.inRound) return;
   match.inRound = false;
   match.roundWinner = winnerId || null;
+  // if team victory, set roundWinnerTeam already set by logic
   console.log('Round ended. winner=', match.roundWinner);
   // mark everyone as spectator so they stop playing until home/next round
   for (const p of players.values()){
@@ -257,12 +329,14 @@ function updateBots(dt){
   const arr = Array.from(players.values());
   for (const bot of arr) {
     if (!bot.isBot || bot.hp<=0) continue;
-    // find nearest other (alive)
+    // find nearest other (alive) that is not on same team
     let nearest = null; let nd = Infinity;
     for (const other of arr) {
       if (other.id === bot.id) continue;
       // skip dead or spectators
       if (other.hp<=0 || other.spectator) continue;
+      // skip teammates when teamMatch
+      if (match.teamMatch && bot.team !== null && other.team === bot.team) continue;
       const d = distance(bot, other);
       if (d < nd) { nd = d; nearest = other; }
     }
@@ -416,15 +490,31 @@ function update(dt){
         p.sliding = 0.6; p.cooldowns.slide = 2.0;
       }
       let vx = 0, vy = 0;
-      if (inpt.up) vy -= 1;
-      if (inpt.down) vy += 1;
-      if (inpt.left) vx -= 1;
-      if (inpt.right) vx += 1;
-      const len = Math.hypot(vx, vy) || 1;
+      // If client provides moveVec (direction from player to cursor), use it to orient movement
+      if (inpt.moveVec && typeof inpt.moveVec.x === 'number' && typeof inpt.moveVec.y === 'number'){
+        const mvx = inpt.moveVec.x; const mvy = inpt.moveVec.y;
+        // forward/back and right/left inputs modulate movement along and across mv
+        const forward = (inpt.up ? 1 : 0) - (inpt.down ? 1 : 0);
+        const right = (inpt.right ? 1 : 0) - (inpt.left ? 1 : 0);
+        // perpendicular (right) vector to mv: (-mvy, mvx)
+        const px = -mvy; const py = mvx;
+        vx = mvx * forward + px * right;
+        vy = mvy * forward + py * right;
+      } else {
+        if (inpt.up) vy -= 1;
+        if (inpt.down) vy += 1;
+        if (inpt.left) vx -= 1;
+        if (inpt.right) vx += 1;
+      }
+      const vlen = Math.hypot(vx, vy);
       let spd = p.speed;
       if (p.sliding && p.sliding > 0) spd *= 1.9;
-      p.vx = (vx/len) * spd;
-      p.vy = (vy/len) * spd;
+      if (vlen > 0.0001){
+        p.vx = (vx / vlen) * spd;
+        p.vy = (vy / vlen) * spd;
+      } else {
+        p.vx = 0; p.vy = 0;
+      }
       // angle towards mouse
       const mx = inpt.mx, my = inpt.my;
       if (mx!==undefined && my!==undefined) {
@@ -484,6 +574,12 @@ function update(dt){
     for (const p of players.values()){
       if (p.hp<=0) continue;
       if (p.id === b.owner) continue;
+      // friendly fire: ignore if same team (when team info exists)
+      const ownerP = players.get(b.owner);
+      if (ownerP && match.teamMatch && ownerP.team !== null && p.team === ownerP.team){
+        // bullet passes through teammate
+        continue;
+      }
       // if target is jumping (short invul), ignore
       if (p.jumping && p.jumping > 0) continue;
       const d = Math.hypot(p.x - b.x, p.y - b.y);
@@ -531,6 +627,52 @@ function update(dt){
     return o.life > 0;
   });
 
+  // flag hill mode: capture logic and all-flags hold timer
+  if (match.mode === 'flagHill'){
+    // for each flag, check presence of teams in radius
+    for (const flag of match.flags){
+      let teamsPresent = new Set();
+      for (const p of players.values()){
+        if (p.hp<=0 || p.spectator) continue;
+        if (!p.team && p.team !== 0) continue;
+        const d = Math.hypot(p.x - flag.x, p.y - flag.y);
+        if (d <= match.flagRadius){ teamsPresent.add(p.team); }
+      }
+      if (teamsPresent.size === 1){
+        const team = Array.from(teamsPresent)[0];
+        if (flag.ownerTeam === team){
+          // already owned
+          flag.captureTeam = null; flag.captureTimer = 0;
+        } else {
+          // attempt capture
+          if (flag.captureTeam === team){
+            flag.captureTimer += dt;
+            if (flag.captureTimer >= match.flagCaptureTime){
+              flag.ownerTeam = team;
+              flag.captureTeam = null; flag.captureTimer = 0;
+            }
+          } else {
+            flag.captureTeam = team; flag.captureTimer = dt;
+          }
+        }
+      } else {
+        // contested or empty
+        flag.captureTeam = null; flag.captureTimer = 0;
+      }
+    }
+    // check if a team holds all flags
+    for (let t=0;t<2;t++){
+      const allOwned = match.flags.every(f => f.ownerTeam === t);
+      if (allOwned){ match.allFlagsHoldTimer[t] += dt; } else { match.allFlagsHoldTimer[t] = 0; }
+      // if held >= 180 sec, end round with team victory
+      if (match.allFlagsHoldTimer[t] >= 180 && match.inRound){
+        match.roundWinnerTeam = t;
+        // end round indicating team win
+        endRound(null);
+      }
+    }
+  }
+
   // update inter-round countdown timer if any
   if (!match.inRound && match.roundTimeLeft && match.roundTimeLeft > 0){
     match.roundTimeLeft = Math.max(0, match.roundTimeLeft - dt);
@@ -544,6 +686,7 @@ function update(dt){
 wss.on('connection', function connection(ws) {
   // create a player and bind socket to that player's id
   const player = createPlayer(false);
+  if (match.teamMatch) assignTeamToPlayer(player);
   const clientId = player.id;
   sockets.set(clientId, ws);
 
@@ -573,6 +716,27 @@ wss.on('connection', function connection(ws) {
         clientOptions.set(clientId, data.options || {});
         // recompute allowBots using centralized logic (online mode or noBots disables bots)
         recomputeAllowBots();
+        // team match and mode handling: take global decision from any client request
+        const opts = data.options || {};
+        if (typeof opts.teamMatch === 'boolean'){
+          match.teamMatch = !!opts.teamMatch;
+          if (match.teamMatch) assignTeams();
+        }
+        if (typeof opts.mode === 'string'){
+          if (opts.mode === 'flagHill'){
+            match.mode = 'flagHill';
+            match.teamMatch = true; // flag hill requires teams
+            assignTeams();
+          } else {
+            match.mode = 'deathmatch';
+          }
+        }
+        // map size requested by client (e.g., 'small'|'medium'|'large' or numeric)
+        if (opts.mapSize !== undefined){
+          try {
+            setMapSize(opts.mapSize);
+          } catch (e){ console.log('setMapSize error', e); }
+        }
       }
     } catch (e){}
   });
@@ -603,17 +767,22 @@ setInterval(()=>{
     type: 'snapshot',
     t: Date.now(),
     players: playersArr.map(p=>({ id:p.id, x:p.x, y:p.y, hp:p.hp, score:p.score, angle:p.angle, isBot:p.isBot, spectator: !!p.spectator, name: p.name, jumping: !!p.jumping, sliding: !!p.sliding, weapon: p.weapon, costume: p.costume })),
+    flags: match.flags || [],
     bullets: Array.from(bullets.values()).map(b=>({ id:b.id, x:b.x, y:b.y, type: b.type })),
     obstacles: obstacles.map(o=>({ id:o.id, x:o.x, y:o.y, w:o.w, h:o.h })),
+    map: { w: MAP_W, h: MAP_H },
     match: {
       inRound: !!match.inRound,
       roundWinner: match.roundWinner,
+      roundWinnerTeam: match.roundWinnerTeam,
       targetKills: match.targetKills,
+      flagCaptureTime: match.flagCaptureTime,
+      flagRadius: match.flagRadius,
       roundTimeLeft: match.roundTimeLeft || 0,
       playerCount: playersArr.length,
       aliveCount: playersArr.filter(p=>p.hp>0).length,
       humanCount: playersArr.filter(p=>!p.isBot).length,
-      players: playersArr.map(p=>({ id:p.id, x:p.x, y:p.y, hp:p.hp, score:p.score, angle:p.angle, isBot:p.isBot, spectator: !!p.spectator, name: p.name, jumping: !!p.jumping, sliding: !!p.sliding, weapon: p.weapon, costume: p.costume })),
+      players: playersArr.map(p=>({ id:p.id, x:p.x, y:p.y, hp:p.hp, score:p.score, angle:p.angle, isBot:p.isBot, spectator: !!p.spectator, name: p.name, jumping: !!p.jumping, sliding: !!p.sliding, weapon: p.weapon, costume: p.costume, team: p.team })),
       kills: recentKills.slice(-20)
     }
   };
