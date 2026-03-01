@@ -16,12 +16,14 @@
   const keys = { w:false,a:false,s:false,d:false };
   let mouse = { x:0,y:0, down:false };
   let showMap = false;
+  let showTeammates = false;
 
   // UI: home screen
   const home = document.getElementById('home');
   const btnCpu = document.getElementById('btnCpu');
   const btnOnline = document.getElementById('btnOnline');
   const gameModeSelect = document.getElementById('gameModeSelect');
+  const mapSizeSelect = document.getElementById('mapSizeSelect');
   const playerNameInput = document.getElementById('playerName');
   const weaponSelect = document.getElementById('weaponSelect');
   const costumeSelect = document.getElementById('costumeSelect');
@@ -82,13 +84,14 @@
       const teamMatch = !!(teamMatchCheckbox && teamMatchCheckbox.checked);
         const rounds = !!(roundsCheckbox && roundsCheckbox.checked);
         const modeSelectVal = (gameModeSelect && gameModeSelect.value) ? gameModeSelect.value : 'deathmatch';
-        ws.send(JSON.stringify({ type:'setOptions', options: { noBots, teamMatch, rounds, mode: modeSelectVal } }));
+        const mapSizeVal = (mapSizeSelect && mapSizeSelect.value) ? mapSizeSelect.value : 'medium';
+        ws.send(JSON.stringify({ type:'setOptions', options: { noBots, teamMatch, rounds, mode: modeSelectVal, mapSize: mapSizeVal } }));
     });
     ws.onmessage = (msg)=>{
       try{
         const data = JSON.parse(msg.data);
         if (data.type === 'init'){
-          myId = data.id; map = data.map; obstacles = data.obstacles || [];
+          myId = data.id; if (data.map) map = data.map; obstacles = data.obstacles || [];
         }
         if (data.type === 'snapshot'){
           // Update snapshot state: players, bullets, obstacles, match
@@ -98,6 +101,8 @@
           if (data.match) {
             state.match = data.match;
           }
+          // server may include current map size in snapshots
+          if (data.map) map = data.map;
           // flags may be provided either in data.flags or data.match.flags; prefer match.flags
           if (data.match && data.match.flags) state.match.flags = data.match.flags;
           else if (data.flags) state.match.flags = data.flags;
@@ -187,6 +192,17 @@
       playerWeapon = 'knife';
       if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type:'setWeapon', weapon: 'knife' }));
     }
+    // Cキーでトグル（knife <-> main weapon from dropdown）
+    if (e.key === 'c' || e.key === 'C'){
+      if (currentWeaponSlot === 2){
+        currentWeaponSlot = 1;
+        playerWeapon = (weaponSelect && weaponSelect.value) ? weaponSelect.value : 'smg';
+      } else {
+        currentWeaponSlot = 2;
+        playerWeapon = 'knife';
+      }
+      if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type:'setWeapon', weapon: playerWeapon }));
+    }
   });
 
   function draw(){
@@ -253,35 +269,63 @@
         continue;
       }
 
-      ctx.save();
-      ctx.translate(p.x, p.y);
-      ctx.rotate(p.angle || 0);
-      // body color by team when teamMatch active
-      let bodyColor = '#88ff88';
-      if (state.match && state.match.playerCount && ('players' in state.match)){
-        // team mode
-        if (typeof p.team === 'number'){
-          const myTeam = state.myTeam;
-          const teamColors = ['#66ccff', '#ff6b6b'];
-          if (myTeam !== null && myTeam !== undefined){
-            bodyColor = (p.team === myTeam) ? teamColors[0] : teamColors[1];
-          } else {
-            // no local team known: color by team id
-            bodyColor = (p.team === 0) ? teamColors[0] : teamColors[1];
-          }
-        } else {
-          // fallback to costume/bot/own coloring
-          if (p.costume === 'red') bodyColor = '#ff6b6b';
-          else if (p.costume === 'blue') bodyColor = '#6b9cff';
-          else if (p.isBot) bodyColor = '#aa66ff';
-          else if (isMe) bodyColor = '#66ccff';
+      // draw either an image costume (if provided) or default colored box
+      const costume = p.costume || 'default';
+      if (typeof costume === 'string' && costume.startsWith('/uploads/')){
+        // try cached image
+        let img = imgCache.get(costume);
+        if (!img){
+          img = new Image();
+          img.src = costume;
+          img.onload = ()=>{ imgCache.set(costume, img); };
+          img.onerror = ()=>{ imgCache.set(costume, null); };
+          imgCache.set(costume, img);
         }
+        if (img && img.complete && img.naturalWidth){
+          const iw = 36, ih = 36;
+          ctx.save(); ctx.translate(p.x, p.y); ctx.rotate(p.angle || 0);
+          ctx.drawImage(img, -iw/2, -ih/2, iw, ih);
+          // barrel overlay
+          ctx.fillStyle = '#222'; ctx.fillRect(6, -4, 20, 8);
+          ctx.restore();
+        } else {
+          // fallback draw box while image loads
+          ctx.save(); ctx.translate(p.x, p.y); ctx.rotate(p.angle || 0);
+          ctx.fillStyle = '#888'; ctx.fillRect(-12, -12, 24, 24);
+          ctx.fillStyle = '#222'; ctx.fillRect(0, -4, 20, 8);
+          ctx.restore();
+        }
+      } else {
+        ctx.save();
+        ctx.translate(p.x, p.y);
+        ctx.rotate(p.angle || 0);
+        // body color by team when teamMatch active
+        let bodyColor = '#88ff88';
+        if (state.match && state.match.playerCount && ('players' in state.match)){
+          // team mode
+          if (typeof p.team === 'number'){
+            const myTeam = state.myTeam;
+            const teamColors = ['#66ccff', '#ff6b6b'];
+            if (myTeam !== null && myTeam !== undefined){
+              bodyColor = (p.team === myTeam) ? teamColors[0] : teamColors[1];
+            } else {
+              // no local team known: color by team id
+              bodyColor = (p.team === 0) ? teamColors[0] : teamColors[1];
+            }
+          } else {
+            // fallback to costume/bot/own coloring
+            if (p.costume === 'red') bodyColor = '#ff6b6b';
+            else if (p.costume === 'blue') bodyColor = '#6b9cff';
+            else if (p.isBot) bodyColor = '#aa66ff';
+            else if (isMe) bodyColor = '#66ccff';
+          }
+        }
+        ctx.fillStyle = bodyColor;
+        ctx.beginPath(); ctx.rect(-12, -12, 24, 24); ctx.fill();
+        // barrel
+        ctx.fillStyle = '#222'; ctx.fillRect(0, -4, 20, 8);
+        ctx.restore();
       }
-      ctx.fillStyle = bodyColor;
-      ctx.beginPath(); ctx.rect(-12, -12, 24, 24); ctx.fill();
-      // barrel
-      ctx.fillStyle = '#222'; ctx.fillRect(0, -4, 20, 8);
-      ctx.restore();
 
       // name
       if (p.name){
@@ -339,6 +383,16 @@
       txt += ` | 残り: ${remaining}`;
       info.textContent = txt;
       scoreEl.textContent = `Score: ${my.score || 0}`;
+      // show team alive counts when teamMatch
+      try{
+        if (state.match && state.match.roundWinnerTeam === undefined && ('blueTeamAliveCount' in state.match || 'redTeamAliveCount' in state.match)){
+          const blue = state.match.blueTeamAliveCount || 0;
+          const red = state.match.redTeamAliveCount || 0;
+          // append to HUD info element
+          const teamInfo = ` | Blue: ${blue}  Red: ${red}`;
+          info.textContent = info.textContent + teamInfo;
+        }
+      }catch(e){}
     }
 
     // Show return-to-home button when we are a spectator
@@ -411,6 +465,7 @@
     }catch(e){}
 
     drawMapOverlay();
+    drawTeammatesOverlay();
     requestAnimationFrame(draw);
   }
 
@@ -483,12 +538,108 @@
     }catch(e){}
   }
 
+  // draw teammates overlay when toggled (L key)
+  function drawTeammatesOverlay(){
+    if (!showTeammates) return;
+    try{
+      const me = state.players.find(x=>x.id===myId);
+      if (!me) return;
+      const team = me.team;
+      if (team === null || team === undefined) return;
+      const mates = state.players.filter(p=>p.team === team && p.id !== myId);
+      const Wb = Math.min(320, Math.floor(Math.min(W, H) * 0.3));
+      const x = 12; const y = 60;
+      ctx.save();
+      ctx.globalAlpha = 0.95;
+      ctx.fillStyle = 'rgba(0,0,0,0.6)'; ctx.fillRect(x, y, Wb, Math.max(80, mates.length * 28 + 24));
+      ctx.fillStyle = '#fff'; ctx.font = '14px Arial'; ctx.fillText('味方一覧', x + 12, y + 20);
+      let oy = y + 34;
+      for (const m of mates){
+        // name
+        ctx.fillStyle = '#fff'; ctx.font = '13px Arial'; ctx.textAlign = 'left';
+        const nm = m.name || m.id;
+        ctx.fillText(nm, x + 12, oy + 12);
+        // hp bar
+        const bw = 120; const bh = 8;
+        ctx.fillStyle = 'rgba(0,0,0,0.5)'; ctx.fillRect(x + Wb - bw - 12, oy + 4, bw, bh);
+        const hpPct = Math.max(0, (m.hp || 0) / (m.maxHp || 100));
+        ctx.fillStyle = '#0f0'; ctx.fillRect(x + Wb - bw - 12, oy + 4, Math.round(bw * hpPct), bh);
+        oy += 28;
+      }
+      ctx.restore();
+    }catch(e){}
+  }
+
   // toggle map view with 'm'
   window.addEventListener('keydown', (e)=>{
     if (e.key === 'm' || e.key === 'M'){
       showMap = !showMap;
     }
+    // toggle teammates overlay with 'l' or 'L'
+    if (e.key === 'l' || e.key === 'L'){
+      showTeammates = !showTeammates;
+    }
   });
+
+  // map size selector: when changed, notify server immediately if connected
+  if (mapSizeSelect){
+    mapSizeSelect.addEventListener('change', ()=>{
+      const val = mapSizeSelect.value;
+      try{ if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type:'setOptions', options: { mapSize: val } })); }catch(e){}
+      appendChatMessage(`マップサイズを ${val} にリクエストしました`);
+    });
+  }
+
+  // tutorial modal handlers
+  const tutorialBtn = document.getElementById('tutorialBtn');
+  const tutorialModal = document.getElementById('tutorialModal');
+  const closeTutorial = document.getElementById('closeTutorial');
+  if (tutorialBtn && tutorialModal){
+    tutorialBtn.addEventListener('click', ()=>{ tutorialModal.style.display = 'flex'; });
+    if (closeTutorial) closeTutorial.addEventListener('click', ()=>{ tutorialModal.style.display = 'none'; });
+    tutorialModal.addEventListener('click', (e)=>{ if (e.target === tutorialModal) tutorialModal.style.display = 'none'; });
+  }
+
+  // Shop modal handlers
+  const shopModal = document.getElementById('shopModal');
+  const closeShop = document.getElementById('closeShop');
+  const shopCoins = document.getElementById('shopCoins');
+  const costumeFile = document.getElementById('costumeFile');
+  // add a HUD button to open shop
+  const hud = document.getElementById('hud');
+  const shopBtn = document.createElement('button');
+  shopBtn.textContent = 'ショップ'; shopBtn.style.marginLeft = '8px'; shopBtn.style.padding='6px'; shopBtn.style.border='0'; shopBtn.style.borderRadius='6px'; shopBtn.style.background='#222'; shopBtn.style.color='#fff'; shopBtn.style.cursor='pointer';
+  hud.appendChild(shopBtn);
+  shopBtn.addEventListener('click', ()=>{ if (shopModal) shopModal.style.display = 'flex'; });
+  if (closeShop) closeShop.addEventListener('click', ()=>{ if (shopModal) shopModal.style.display = 'none'; });
+  if (shopModal) shopModal.addEventListener('click', (e)=>{ if (e.target === shopModal) shopModal.style.display = 'none'; });
+
+  // purchase buttons
+  document.addEventListener('click', (e)=>{
+    const el = e.target;
+    if (el && el.classList && el.classList.contains('buyBtn')){
+      const item = el.getAttribute('data-item');
+      try{ if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type:'purchase', item })); }catch(e){}
+    }
+  });
+
+  // handle file upload -> read DataURL and send via websocket
+  if (costumeFile){
+    costumeFile.addEventListener('change', (ev)=>{
+      const f = ev.target.files && ev.target.files[0];
+      if (!f) return;
+      const reader = new FileReader();
+      reader.onload = ()=>{
+        const dataUrl = reader.result;
+        try{ if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type:'uploadCostume', data: dataUrl })); }catch(e){}
+        appendChatMessage('コスチューム画像をアップロード中...');
+      };
+      reader.readAsDataURL(f);
+    });
+  }
+
+  // image cache for costume rendering
+  const imgCache = new Map();
 
   // action keys: special (q), build (e), jump (space), slide (Shift)
   window.addEventListener('keydown', (e)=>{

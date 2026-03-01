@@ -2,6 +2,7 @@ const express = require('express');
 const http = require('http');
 const WebSocket = require('ws');
 const path = require('path');
+const fs = require('fs');
 
 const app = express();
 const server = http.createServer(app);
@@ -13,8 +14,8 @@ app.use(express.static(path.join(__dirname, 'public')));
 // Game constants
 const TICK_RATE = 20; // 20 updates per second
 const BROADCAST_RATE = 20; // 20 sends per second
-let MAP_W = 2000;
-let MAP_H = 2000;
+let MAP_W = 4000;
+let MAP_H = 4000;
 const MIN_PLAYERS = 10;
 
 let nextId = 1;
@@ -163,7 +164,10 @@ function createPlayer(isBot = false) {
     costume: 'default'
   };
   p.team = null; // team id (0 or 1) when teamMatch active
+  p.coins = isBot ? 0 : 50; // starting coins for humans
   if (isBot) p.botStats = { shots:0, hits:0, kills:0 };
+  // bot targeting state
+  if (isBot){ p.currentTargetId = null; p.targetSince = 0; }
   players.set(id, p);
   return p;
 }
@@ -327,12 +331,27 @@ function circleRectCollide(cx, cy, r, rect){
 // Bot AI: chase nearest enemy
 function updateBots(dt){
   const arr = Array.from(players.values());
+  const nowSec = Date.now()/1000;
   for (const bot of arr) {
     if (!bot.isBot || bot.hp<=0) continue;
-    // find nearest other (alive) that is not on same team
+    // if previously targeted player is gone, clear target
+    if (bot.currentTargetId){
+      const prev = players.get(bot.currentTargetId);
+      if (!prev || prev.hp <= 0) { bot.currentTargetId = null; bot.targetSince = 0; }
+    }
+    // determine if we should temporarily exclude the long-targeted player
+    let excludeId = null;
+    if (bot.currentTargetId && bot.targetSince && (nowSec - bot.targetSince) > 60){
+      const prev = players.get(bot.currentTargetId);
+      // only exclude if the target is still alive (not killed)
+      if (prev && prev.hp > 0){ excludeId = bot.currentTargetId; }
+    }
+    // find nearest other (alive) that is not on same team; try excluding the old target when applicable
     let nearest = null; let nd = Infinity;
     for (const other of arr) {
       if (other.id === bot.id) continue;
+      // skip excludeId if set (forces change of target)
+      if (excludeId && other.id === excludeId) continue;
       // skip dead or spectators
       if (other.hp<=0 || other.spectator) continue;
       // skip teammates when teamMatch
@@ -340,7 +359,19 @@ function updateBots(dt){
       const d = distance(bot, other);
       if (d < nd) { nd = d; nearest = other; }
     }
-  if (nearest) {
+    // if we couldn't find any when excluding, fall back to allowing previous target (if any)
+    if (!nearest && excludeId){
+      for (const other of arr) {
+        if (other.id === bot.id) continue;
+        if (other.hp<=0 || other.spectator) continue;
+        if (match.teamMatch && bot.team !== null && other.team === bot.team) continue;
+        const d = distance(bot, other);
+        if (d < nd) { nd = d; nearest = other; }
+      }
+    }
+    if (nearest) {
+      // if target changed, reset timer
+      if (bot.currentTargetId !== nearest.id){ bot.currentTargetId = nearest.id; bot.targetSince = nowSec; }
       // set velocity toward nearest
       const dx = nearest.x - bot.x;
       const dy = nearest.y - bot.y;
@@ -382,7 +413,7 @@ function updateBots(dt){
       // occasionally use special if close
       if (nd < 350 && bot.cooldowns && bot.cooldowns.special <= 0 && Math.random() < 0.03){
         shootSpecial(bot, nx, ny);
-        bot.cooldowns.special = 5.0;
+        bot.cooldowns.special = 5.0;      
       }
       // sometimes build a wall between bot and target
       if (bot.cooldowns && bot.cooldowns.build <= 0 && Math.random() < 0.01){
@@ -599,9 +630,30 @@ function update(dt){
                 // compute current alive count and store in match
                 const aliveCountNow = Array.from(players.values()).filter(x=>x.hp>0).length;
                 match.aliveCount = aliveCountNow;
-                // New win condition: aliveCount < 2 AND owner is present and alive
-                if (match.inRound && !match.roundWinner && match.aliveCount < 2 && players.has(owner.id) && owner.hp > 0){
-                  endRound(owner.id);
+                // if team match, compute per-team alive counts and decide winner when one team is wiped
+                if (match.teamMatch){
+                  let blueAlive = 0, redAlive = 0;
+                  for (const pl of players.values()){
+                    if (pl.hp>0 && !pl.spectator){
+                      if (pl.team === 0) blueAlive++; else if (pl.team === 1) redAlive++;
+                    }
+                  }
+                  match.blueTeamAliveCount = blueAlive;
+                  match.redTeamAliveCount = redAlive;
+                  if (match.inRound && !match.roundWinnerTeam){
+                    if (blueAlive === 0 && redAlive > 0){
+                      match.roundWinnerTeam = 1; // red wins
+                      endRound(null);
+                    } else if (redAlive === 0 && blueAlive > 0){
+                      match.roundWinnerTeam = 0; // blue wins
+                      endRound(null);
+                    }
+                  }
+                } else {
+                  // New win condition for free-for-all: aliveCount < 2 AND owner is present and alive
+                  if (match.inRound && !match.roundWinner && match.aliveCount < 2 && players.has(owner.id) && owner.hp > 0){
+                    endRound(owner.id);
+                  }
                 }
             }
           // respawn after a short delay handled below
@@ -711,6 +763,13 @@ wss.on('connection', function connection(ws) {
           if (typeof data.weapon === 'string') p.weapon = (data.weapon === 'sniper') ? 'sniper' : 'smg';
           if (typeof data.costume === 'string') p.costume = data.costume.substring(0, 32);
         }
+      } else if (data.type === 'setWeapon'){
+        const p = players.get(clientId);
+        if (p && typeof data.weapon === 'string'){
+          // allow 'knife', 'smg', 'sniper' as valid values
+          const w = data.weapon;
+          if (w === 'knife' || w === 'smg' || w === 'sniper') p.weapon = w;
+        }
       } else if (data.type === 'setOptions'){
         // store client options like { noBots: true }
         clientOptions.set(clientId, data.options || {});
@@ -736,6 +795,48 @@ wss.on('connection', function connection(ws) {
           try {
             setMapSize(opts.mapSize);
           } catch (e){ console.log('setMapSize error', e); }
+        }
+      }
+      // purchase via websocket
+      if (data.type === 'purchase'){
+        const p = players.get(clientId);
+        const item = data.item;
+        const prices = { sniper: 150, smg: 0, knife: 0 };
+        const cost = prices[item] || 0;
+        if (p){
+          if ((p.coins || 0) >= cost){
+            p.coins = (p.coins || 0) - cost;
+            // apply purchase (weapon)
+            if (item === 'sniper' || item === 'smg' || item === 'knife') p.weapon = item;
+            // ack
+            try{ ws.send(JSON.stringify({ type:'purchaseResult', success:true, item, coins: p.coins })); }catch(e){}
+          } else {
+            try{ ws.send(JSON.stringify({ type:'purchaseResult', success:false, item, reason:'not_enough_coins', coins: p.coins || 0 })); }catch(e){}
+          }
+        }
+      }
+      // upload costume via websocket (dataURL)
+      if (data.type === 'uploadCostume'){
+        const p = players.get(clientId);
+        const dataUrl = data.data;
+        if (p && typeof dataUrl === 'string' && dataUrl.indexOf('data:') === 0){
+          try{
+            // parse base64
+            const matches = dataUrl.match(/^data:(image\/png|image\/(jpeg|jpg));base64,(.+)$/);
+            if (matches){
+              const ext = (matches[1].indexOf('png')>=0) ? 'png' : 'jpg';
+              const b64 = matches[3];
+              const buf = Buffer.from(b64, 'base64');
+              const fname = `c_${clientId}_${Date.now()}.${ext}`;
+              const outPath = path.join(__dirname, 'public', 'uploads', fname);
+              fs.writeFileSync(outPath, buf);
+              // set player's costume to URL path
+              p.costume = `/uploads/${fname}`;
+              try{ ws.send(JSON.stringify({ type:'uploadResult', success:true, path: p.costume })); }catch(e){}
+            } else {
+              try{ ws.send(JSON.stringify({ type:'uploadResult', success:false, reason:'invalid_data' })); }catch(e){}
+            }
+          }catch(e){ try{ ws.send(JSON.stringify({ type:'uploadResult', success:false, reason:'save_error' })); }catch(e){} }
         }
       }
     } catch (e){}
@@ -766,7 +867,7 @@ setInterval(()=>{
   const snapshot = {
     type: 'snapshot',
     t: Date.now(),
-    players: playersArr.map(p=>({ id:p.id, x:p.x, y:p.y, hp:p.hp, score:p.score, angle:p.angle, isBot:p.isBot, spectator: !!p.spectator, name: p.name, jumping: !!p.jumping, sliding: !!p.sliding, weapon: p.weapon, costume: p.costume })),
+    players: playersArr.map(p=>({ id:p.id, x:p.x, y:p.y, hp:p.hp, score:p.score, angle:p.angle, isBot:p.isBot, spectator: !!p.spectator, name: p.name, jumping: !!p.jumping, sliding: !!p.sliding, weapon: p.weapon, costume: p.costume, coins: p.coins || 0 })),
     flags: match.flags || [],
     bullets: Array.from(bullets.values()).map(b=>({ id:b.id, x:b.x, y:b.y, type: b.type })),
     obstacles: obstacles.map(o=>({ id:o.id, x:o.x, y:o.y, w:o.w, h:o.h })),
@@ -775,6 +876,8 @@ setInterval(()=>{
       inRound: !!match.inRound,
       roundWinner: match.roundWinner,
       roundWinnerTeam: match.roundWinnerTeam,
+      blueTeamAliveCount: match.blueTeamAliveCount || 0,
+      redTeamAliveCount: match.redTeamAliveCount || 0,
       targetKills: match.targetKills,
       flagCaptureTime: match.flagCaptureTime,
       flagRadius: match.flagRadius,
